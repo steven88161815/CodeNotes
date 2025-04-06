@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Title</title>
+  </head>
+  <body>
+    <div id="parent">
+      This is parent content.
+      <div id="child1">This is child1.</div>
+      <div id="child2">This is child2.</div>
+      <div id="number"> 1 2 3 
+        <span> 4 5 6 
+        </span> 7 8 9 
+      </div>
+    </div>
+    <script>
+      // https://juejin.cn/post/7066778860024496165
+      let parentEle1 = document.getElementById('parent');
+      console.log(parentEle1 instanceof Node); // true
+      console.log(parentEle1 instanceof Element); // true
+      console.log(parentEle1 instanceof HTMLElement); // true
+      console.log("=======================================================");
+      let parentEle2 = document.querySelector('#parent');
+      console.log(parentEle2 instanceof Node); // true
+      console.log(parentEle2 instanceof Element); // true
+      console.log(parentEle2 instanceof HTMLElement); // true
+      console.log("=======================================================");
+      console.log(document.querySelector('#parent'));
+      console.log(document.querySelector('#parent').__proto__);
+      console.log(document.querySelector('#parent').__proto__.__proto__);
+      console.log(document.querySelector('#parent').__proto__.__proto__.__proto__);
+      console.log(document.querySelector('#parent').__proto__.__proto__.__proto__.__proto__);
+      console.log(document.querySelector('#parent').__proto__.__proto__.__proto__.__proto__.__proto__);
+      console.log(document.querySelector('#parent').__proto__.__proto__.__proto__.__proto__.__proto__.__proto__);
+      console.log(document.querySelector('#parent').__proto__.__proto__.__proto__.__proto__.__proto__.__proto__.__proto__);
+      console.log("=======================================================");
+      console.log(document.getElementById("parent"));
+      console.log(document.getElementById("parent").__proto__);
+      console.log(document.getElementById("parent").__proto__.__proto__);
+      console.log(document.getElementById("parent").__proto__.__proto__.__proto__);
+      console.log(document.getElementById("parent").__proto__.__proto__.__proto__.__proto__);
+      console.log(document.getElementById("parent").__proto__.__proto__.__proto__.__proto__.__proto__);
+      console.log(document.getElementById("parent").__proto__.__proto__.__proto__.__proto__.__proto__.__proto__);
+      console.log(document.getElementById("parent").__proto__.__proto__.__proto__.__proto__.__proto__.__proto__.__proto__);
+      console.log("=======================================================");
+      console.log(document.getElementById("parent").childNodes); // NodeList[7]
+      console.log(document.getElementById("parent").childNodes[0]);
+      console.log(document.getElementById("parent").childNodes[1]);
+      console.log(document.getElementById("parent").childNodes[2]);
+      console.log(document.getElementById("parent").childNodes[3]);
+      console.log(document.getElementById("parent").childNodes[4]);
+      console.log(document.getElementById("parent").childNodes[5]);
+      console.log(document.getElementById("parent").childNodes[6]);
+      console.log("=========================================================");
+      console.log(document.getElementById("parent").children); // HTMLCollection[3]
+      console.log(document.getElementById("parent").children[0]);
+      console.log(document.getElementById("parent").children[1]);
+      console.log(document.getElementById("parent").children[2]);
+    </script>
+  </body>
+</html>
