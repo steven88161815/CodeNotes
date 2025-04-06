@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Document</title>
+    </head>
+    <body>
+        <script>
+            const jsonString1 = `{"name": "王小明"}`;
+            console.log(jsonString1);
+
+            const jsonObj1 = JSON.parse(jsonString1);
+            console.log(jsonObj1);
+            console.log(jsonObj1.name);
+
+            const jsonString2 = `
+            [{
+                "name": "王小明",
+                "age": 18,
+                "family": {
+                    "mother": "陳小蘭"
+                }
+            }]
+            `;
+            const jsonObj2 = JSON.parse(jsonString2);
+            console.log(jsonObj2);
+
+            const jsonObj3 = {
+                name: "王小明",
+                age: 18,
+                sayHi: function () {
+                    console.log(123);
+                },
+                family: {
+                    mother: "陳小蘭",
+                },
+            };
+            const jsonString3 = JSON.stringify(jsonObj3);
+            console.log(jsonString3);
+
+            fetch("./data.json")
+                .then(function (res) {
+                    console.log(res);
+                    return res.json();
+                })
+                .then(function (data) {
+                    console.log(data);
+                });
+
+            fetch("./data.json")
+                .then(function (res) {
+                    console.log(res);
+                    return res.text();
+                })
+                .then(function (data) {
+                    console.log(JSON.parse(data));
+                });
+
+            // function wait(ms) {
+            //     return new Promise((resolve) => setTimeout(resolve, ms));
+            // }
+
+            // async function showText() {
+            //     console.log("等 1 秒...");
+            //     await wait(1000);
+            //     console.log("時間到了！");
+            // }
+
+            // showText();
+
+            /*
+            「Promise 是處理非同步的一種工具，但非同步操作（像是 setTimeout、XHR、事件監聽）不一定會用 Promise 實現」
+            await 是用來「等 Promise 結果」，並且只能在 async 函式裡面使用，加在「會回傳 Promise 的東西」前面才有意義！
+            resolve()	✅ 告訴 Promise：「任務完成成功」
+            */
+        </script>
+    </body>
+</html>

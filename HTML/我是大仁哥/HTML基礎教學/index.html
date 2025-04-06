@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Document</title>
+    </head>
+    <body>
+        <a href="https://www.google.com.tw/">google</a>
+        <br />
+        <a target="_blank" href="https://www.google.com.tw/">google</a>
+        <br />
+        <a target="_self" href="https://www.google.com.tw/">google</a>
+        <br />
+
+        <img src="./cat.jpg" alt="一隻貓的圖片" width="500" />
+        <br />
+
+        <input type="date" />
+        <br />
+        <!-- 只能寫單行 -->
+        <input
+            type="text"
+            value="你好"
+            placeholder="請輸入文字"
+            maxlength="5"
+        />
+        <br />
+        <!-- 可寫多行 -->
+        <textarea placeholder="請輸入文字" cols="5" rows="3">你好</textarea>
+        <br />
+
+        <video src="hotpot.mp4" controls width="1000"></video>
+        <br />
+
+        <iframe src="https://example.com/" width="400"></iframe>
+        <!-- 有些網址不允許嵌入 -->
+        <iframe src="https://www.google.com.tw/" width="400"></iframe>
+        <!-- 嵌入youtube影片 -->
+        <iframe
+            width="560"
+            height="315"
+            src="https://www.youtube.com/embed/zdwmMl1GAVQ?si=wpfTOH3F3NSdqtem"
+            title="YouTube video player"
+            frameborder="0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            referrerpolicy="strict-origin-when-cross-origin"
+            allowfullscreen
+        ></iframe>
+        <br />
+
+        <!-- 文字內容盡量與標籤名吻合，這樣搜索引擎才能更好的理解網站-->
+
+        <!-- html entity => 用代碼的形式展示字元(避免與html語法產生衝突)-->
+        <p>我是p標籤&lt;p&gt;&copy;</p>
+
+        <hr />
+
+        <ul>
+            <li><a href="index.html">首頁</a></li>
+            <li><a href="contact.html">聯繫我</a></li>
+        </ul>
+
+        <small>Copyright &copy; by 小生</small>
+    </body>
+</html>
