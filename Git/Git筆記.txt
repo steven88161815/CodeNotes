@@ -1,0 +1,34 @@
+git checkout -b feature/test-git-vscode origin/feature/test-git-vscode
+# ✅ 建立一個本地分支 feature/test-git-vscode，並追蹤遠端 origin/feature/test-git-vscode 分支
+# ✅ 同時自動切換到這個分支（你接下來的開發都在這裡進行）
+
+git fetch --all
+# 🔄 從所有 remote（通常是 origin）抓取最新的分支資訊、更新，但不會自動 merge
+# ✅ 用來同步最新的遠端變化（例如新建的分支或 commit）
+
+git branch -r
+# 📋 列出所有「遠端分支」（remote branches）
+# ✅ 用來確認目前有哪些遠端分支（需要先 fetch 才會顯示最新的）
+
+git status
+# 🕵️ 查看目前檔案狀態（哪些是未追蹤、新增、修改）
+# ✅ 每次修改完都可以用來確認變更內容
+
+git add CCC.txt
+# ➕ 將單一檔案 CCC.txt 加入暫存區（staging area），準備 commit
+
+git add .
+# ➕ 將「所有變更中的檔案」都加入暫存區（包含新增、修改、刪除的檔案）
+# ✅ 快速全選法，常用在小專案或確定所有變更都要一起提交時
+
+git commit -m "新增 CCC.txt 與 DDD.txt 測試檔"
+# 📝 提交（commit）當前暫存的所有變更，並附上一段描述訊息
+# ✅ 建議寫具意義的 commit message，方便日後追蹤
+
+git push -u origin feature/test-git-vscode
+# ☁️ 第一次推送這個本地分支到遠端（origin）
+# ✅ 並「綁定」這個本地分支與遠端分支，之後可直接用 `git push` / `pull`
+
+git push
+# ☁️ 將當前分支的變更推送到對應的遠端分支
+# ✅ 若已經設定過 upstream（`-u`），這樣就可以簡寫推送
