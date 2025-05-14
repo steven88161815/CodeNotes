@@ -1,0 +1,27 @@
+@startuml
+actor User
+participant "Frontend (Next.js)" as FE
+participant "Backend (Spring Boot)" as BE
+participant DB
+participant AIPService
+
+User -> FE : 點擊「下載報表」按鈕
+FE -> FE : 取得 username\n與當前年份（YYYY）
+FE -> BE : POST /generate-report\n(username, year)
+
+BE -> BE : 根據年份組 SQL 查詢語法
+BE -> DB : 執行 SQL 取得報表資料
+BE -> BE : 產製 Excel byte[] 檔案
+
+BE -> AIPService : POST /apply-security\n(byte[], level = B)
+alt AIP 加密成功
+  AIPService --> BE : 回傳加密後的 byte[]
+else AIP 加密失敗
+  AIPService --> BE : 回傳錯誤\n→ 使用未加密檔案
+end
+
+BE -> BE : 取得當下時間\n格式為 YYYYMMDDhhmmss
+BE --> FE : 回傳 Excel byte[]\n檔名：Backend_Price_Guide_<時間>.xlsx
+
+FE -> User : 觸發瀏覽器下載 Excel
+@enduml
