@@ -1,0 +1,26 @@
+* Objectives & Results (50%)
+	* Domain / Technical Depth (35%)
+		* 1. OFD Related Projects: Utilized Jaspersoft Studio to adjust .jrxml files and modify Java code for accurate PDF report generation in quote forms. In the Portfolio report, understood and applied the code’s message-processing mechanisms to optimize Excel report content and add OFD-related fields.
+		* 2. Approval Center: Implemented batch approval functionality on the frontend, enabling the processing of multiple items simultaneously, which resolved the “one-by-one” efficiency bottleneck of the existing VB system. Optimized backend caching for pending approval lists, resolving N+1 issues and yielding up to a 66% improvement in processing time.
+		* 3. Semgrep Scan Automation: Developed a Python script that successfully automated Semgrep scanning for 59 PQO projects. The script handled complex logic such as repository downloads, rule applications, deduplication of scan results, and filtering for specific log keywords, achieving fully autonomous operation after less than five minutes of setup and boosting efficiency by several orders of magnitude.
+		* 4. Backend PG Automation: Designed and implemented the Backend PG automation tool, reducing manual operations from 10–20 minutes to 30 seconds and significantly boosting PMO business efficiency.
+
+	* Team Collaboration (15%)
+		* 1. Confirmed PRD content with PMs for functional accuracy. Simultaneously, actively learned and documented technical and business knowledge from mentors, taking on tasks aligned with expertise and workload.
+		* 2. Collaborated with colleagues to research and integrate fragmented official SOPs for Admin Zone 2.0 OTJH process, creating a complete and up-to-date guide for the team.
+
+* Innovation and Productivity (30%)
+	* Execution (30%)
+		* 1. Project Delivery & Cross-team Execution: Delivered multiple projects (e.g., Backend PG, OFD, Direct Biz) on schedule by proactively monitoring WBS progress, coordinating timelines with PMs, confirming PRD functional accuracy, and performing pre-release checks, ensuring zero production issues.
+		* 2. SOP Optimization & Execution: Executed YL’s revised VB development environment SOP, identified and proposed process improvements, ensuring code executability in local environments.
+		* 3. Proactive Issue Resolution: Detected and reported existing functional issues to mentor, created and tracked related tickets, and ensured timely resolution.
+		
+* People (20%)
+	* Communication (20%)
+		* 1. DevOps Sharing: Presented the usage of Admin Zone 2.0 with YL and SH, clarified the core problems solved, and demonstrated operational procedures, effectively enhancing the team’s understanding and application of new tools and workflows.
+		* 2. Prepared the Release Unit Deploy List, checked CI pipeline metrics, and performed sanity checks by reviewing logs to ensure the quality and stability of each release.
+		* 3. Assisted with daily administrative tasks, including equipment inventory during team relocation and tracking participation in outdoor activities, to ensure smooth team operations.
+
+
+* Area for Improvment
+	* Gained a deeper understanding of PQO’s new and legacy system architectures and module interactions, laying a solid foundation for their long-term evolution and maintenance.
