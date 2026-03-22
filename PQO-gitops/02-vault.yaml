@@ -1,0 +1,7 @@
+apiVersion: ricoberger.de/v1alpha1
+kind: VaultSecret
+metadata:
+  name: pdmetl-central
+spec:
+  path: kv-crm/pqo-secret/prod/pdmetl-central
+  type: Opaque

@@ -1,0 +1,93 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  annotations: {}
+  labels:
+    name: pdmetl-central
+  name: pdmetl-central
+spec:
+  concurrencyPolicy: Replace
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      backoffLimit: 1
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/proxyCPU: 100m
+            sidecar.istio.io/proxyCPULimit: 300m
+            sidecar.istio.io/proxyMemory: 256Mi
+            sidecar.istio.io/proxyMemoryLimit: 1Gi
+          labels:
+            com.tsmc.paas/deployer: CCJUANGF
+            com.tsmc.paas/developer: CCJUANGF
+            com.tsmc.paas/site_sponsor: HUANGSYE
+        spec:
+          containers:
+            - command:
+              - /bin/sh
+              - -c
+              - >
+                # BEFORE main code
+                
+                until curl -fsI http://localhost:15021/healthz/ready;
+                
+                do
+                  echo "$(date) waiting sidecar ready ..."
+                  sleep 5;
+                done
+
+                # main code
+                java -Duser.timezone=Asia/Taipei -jar /opt/spring/PQO-PDMETl.jar --spring.config.location=file:/opt/spring/config/application.properties
+
+                # After main code
+                EXIT_CODE=$(echo $?)
+                echo "$(date) stopping sidecar ..."
+                curl -fsI -X POST http://localhost:15020/quitquitquit && exit $EXIT_CODE
+              image: tcr.ent.tsmc.com/dockeruncer/crm/pqo-pdmetl/pqo-pdmetl:1.0.0-b748395
+              env:
+                - name: cipher_key
+                  valueFrom:
+                    secretKeyRef:
+                      key: cipher_key
+                      name: pdmetl-central
+                - name: pdm_password
+                  valueFrom:
+                    secretKeyRef:
+                      key: pdm_password
+                      name: pdmetl-central
+                - name: pqoDataSource_password
+                  valueFrom:
+                    secretKeyRef:
+                      key: pqoDataSource_password
+                      name: pdmetl-central
+              name: pdmetl-central
+              resources:
+                limits:
+                  cpu: 300m
+                  memory: 1Gi
+                requests:
+                  cpu: 100m
+                  memory: 0.5Gi
+              volumeMounts:
+                - mountPath: /opt/spring/config/application.properties
+                  name: pdmetl-central-application-properties
+                  subPath: application.properties
+          tolerations:
+            - key: node-routable
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          nodeSelector:
+            node-routable: "true"
+          restartPolicy: Never
+          volumes:
+            - configMap:
+                defaultMode: 511
+                name: pdmetl-central-application-properties-cm
+              name: pdmetl-central-application-properties
+  schedule: 45 1-23/2 * * *
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  suspend: true

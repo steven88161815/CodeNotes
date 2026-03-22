@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pdmetl-central-application-properties-cm
+data:
+  application.properties: |
+    spring.main.web-application-type=NONE
+
+    cipher.key=${cipher_key}
+
+    pqoDataSource.username=pqo_ap
+    pqoDataSource.password=${pqoDataSource_password}
+    pqoDataSource.jdbcUrl=jdbc:oracle:thin:@//pqo-srv.tsmc.com:1521/pqo-svc
+    pqoDataSource.maxPoolSize=1
+
+    pdm.baseurl=http://itcmbus-pdmti.plm.tw.ent.tsmc.com
+    pdm.username=PQO_AP
+    pdm.password=${pdm_password}
+
+    logging.level.com.tsmc.pqo.etl.cis.batch=WARN
+    logging.level.com.tsmc.siview.encrypt=ERROR
