@@ -1,0 +1,246 @@
+🟢 開場（30 秒）
+
+大家好，今天想跟大家分享我這次做的一個 ETL 重構任務。
+
+主要是把原本使用 Spring Batch 的 ETL，改寫成 Airflow DAG 的架構，並且整合到 PQO-batch repository 裡面。
+
+🟢 1. 任務描述（約 1 分鐘）
+
+這次的任務主要處理三個 ETL：
+
+TI_PROC_OPT
+TI_RAW_WAFER_QUES
+TI_WF_OPT_CATG
+
+資料來源是 PDM API，最後會同步到 Oracle DB。
+
+整體流程其實很單純，就是：
+
+👉 從 API 抓資料 → 做欄位轉換 → 寫入資料庫
+
+🟢 2. 原本設計（約 3 分鐘）
+
+原本的架構是使用 Spring Batch，整體流程是：
+
+Kubernetes CronJob 觸發
+啟動 Spring Boot application
+執行 Spring Batch Job
+透過 Reader / Processor / Writer 完成 ETL
+
+👉 可以看這張圖（指圖）
+
+這是一個典型的 Spring Batch 架構。
+
+🔴 接下來是重點：問題
+
+我這邊整理了四個主要問題。
+
+❗ 問題一：Log 冗餘
+
+Spring Batch 本身會產生很多 framework log，
+再加上我們自己寫的應用層 log，會全部混在一起。
+
+👉 結果是：
+
+error 很難找
+log 可讀性差
+debug 成本高
+❗ 問題二：維護成本高
+
+因為是 Spring Boot 專案，所以 dependency 比較多。
+
+像是：
+
+Spring Batch
+JPA
+JDBC driver
+
+👉 升版的時候常常會影響 CI pipeline，甚至會有相依衝突問題。
+
+❗ 問題三：架構過重
+
+Spring Batch 有 Reader / Processor / Writer 的 abstraction。
+
+但對這個 ETL 來說，其實只是：
+
+👉 call API → mapping → insert DB
+
+👉 但我們卻要拆成很多 class
+
+所以會變成：
+
+code 分散
+flow 不直覺
+debug 要跳來跳去
+❗ 問題四：排程與邏輯分離
+
+原本：
+
+排程在 Kubernetes CronJob
+邏輯在 Spring Boot
+
+👉 這會導致：
+
+部署要改兩個地方
+排程與程式版本可能不一致
+debug 比較困難
+🟢 3. 為什麼改成 Airflow（約 2 分鐘）
+
+這次改動的核心思考是：
+
+👉 把 ETL 從 Application-centric
+👉 轉成 Orchestration-centric
+
+也就是說：
+
+👉 不再用一個 application 來跑 batch
+👉 而是交給 Airflow 來管理整個流程
+
+主要目標有四個：
+
+降低維護成本
+提升可觀測性
+簡化架構
+統一排程管理
+🟢 4. 新架構（約 4 分鐘）
+
+現在的架構是：
+
+Airflow DAG
+每個 ETL 是一個 DAG
+透過 PythonOperator 執行
+
+👉 可以看這張圖
+
+整個核心被抽成一個 function：
+
+👉 pdm_api_full_load_task
+
+裡面包含：
+
+Extract（呼叫 API）
+Transform（用 pandas）
+Load（寫 Oracle）
+Logging
+Transaction control
+
+👉 也就是說：
+
+現在每個 DAG 只需要定義：
+
+API endpoint
+transform function
+SQL generation function
+
+👉 就可以完成一個 ETL
+
+🔥 ETL Flow（這張圖很重要）
+
+👉 可以看這張流程圖
+
+整個流程是：
+
+呼叫 API
+判斷有沒有資料
+做資料轉換
+產生 SQL
+進入 transaction
+先 DELETE
+再 INSERT
+成功就 commit，失敗就 rollback
+
+👉 這裡的重點是：
+
+DELETE + INSERT 是在同一個 transaction
+
+👉 所以可以確保：
+
+不會有半寫入的情況
+資料一致性是安全的
+🟢 5. 核心設計亮點（約 3 分鐘）
+⭐ 第一點：通用 ETL Framework
+
+我把整個 ETL 抽成一個共用 function。
+
+👉 好處是：
+
+可以重用
+未來新增 ETL 很快
+不用每次重寫流程
+⭐ 第二點：Transaction 保證一致性
+
+👉 任一筆錯 → 全部 rollback
+
+這比原本安全很多。
+
+⭐ 第三點：Logging 分層
+
+現在有兩張表：
+
+PERF_LOG：記錄整體結果
+CTRL_LOG：記錄逐筆錯誤
+
+👉 debug 會清楚很多
+
+⭐ 第四點：Retry 機制
+
+Airflow 本身支援 retry + backoff
+
+👉 不需要自己寫 retry logic
+
+⭐ 第五點：DAG 粒度
+
+👉 一個表一個 DAG
+
+可以單獨 rerun
+影響範圍小
+⭐ 第六點：模組解耦
+
+Transform 跟 SQL 分開寫
+
+👉 code 結構比較清楚
+
+🟢 6. 設計取捨（約 2 分鐘）
+📌 第一點：SQL execution
+
+目前是逐筆 insert。
+
+👉 原因是資料量不到 100 筆，所以效能沒有問題。
+
+👉 但未來如果資料量變大：
+
+會改成 batch insert（executemany）
+📌 第二點：Full load 策略
+
+目前用：
+
+👉 DELETE FROM table
+
+👉 優點是：
+
+可以 rollback
+保證一致性
+
+👉 缺點是：
+
+比 TRUNCATE 慢
+
+但在目前資料量下是可以接受的。
+
+🟢 7. 成效（約 1 分鐘）
+
+整體來說：
+
+架構變簡單
+維護成本降低
+可觀測性提升
+排程集中管理
+🟢 8. Future Work（約 1 分鐘）
+
+未來可以優化的方向有：
+
+batch insert
+data volume control
+streaming / chunk
+DAG 拆分
+monitoring / alert
