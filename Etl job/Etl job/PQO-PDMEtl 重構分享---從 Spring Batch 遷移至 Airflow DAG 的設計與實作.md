@@ -62,7 +62,6 @@ PDM API → Transform → Oracle DB
 - Airflow DAG 新架構
 - 核心實作方式
 - 重構後的效益與 trade-off
-- 後續可再優化的方向
 
 ---
 
