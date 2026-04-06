@@ -2,7 +2,7 @@
 # 1. 背景與任務目標
 
 本次任務的目標，是將既有 `PQO-PDMEtl` 系統中的 ETL 流程，  
-由原本的 **Spring Batch 應用程式**，重構為 `PQO-batch` repository 中的 **Airflow DAG 任務**。
+由原本的 **Spring Batch 應用**，重構為 `PQO-batch` repository 中的 **Airflow DAG 任務**。
 
 此次重構的核心，不只是程式語言從 Java 改為 Python，  
 而是將 ETL 的執行模式由：
