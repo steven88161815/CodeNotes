@@ -1,0 +1,536 @@
+1. 背景與任務目標
+
+各位好，今天想跟大家分享一下，我這次做的一個 ETL 重構任務。
+主題是把原本 PQO-PDMEtl 裡面用 Spring Batch 寫的 ETL，搬到 PQO-batch repository，改成用 Airflow DAG 來實作。
+
+這次重構我覺得最重要的點，其實不只是把 Java 改成 Python。
+真正的核心轉變是，原本我們的 ETL 比較像是一個「要被啟動的應用程式」，
+現在則變成 Airflow workflow 裡面的一個 task。
+
+也就是說，原本是到時間後先啟動一個 Spring Boot application，
+再由裡面的 Spring Batch 去執行 ETL。
+現在改成 Airflow 後，是由既有的排程系統直接去觸發一個 DAG task 來完成 ETL。
+
+1.1 任務範圍
+
+這次重構的範圍主要有三個 ETL：
+
+第一個是 TI_PROC_OPT，
+第二個是 TI_RAW_WAFER_QUES，
+第三個是 TI_WF_OPT_CATG。
+
+這三個 ETL 的資料來源都是 PDM API，目標端都是 Oracle DB。
+
+1.2 ETL 流程概念
+
+如果用一句話描述這次的 ETL，其實就是：
+
+PDM API 的資料，經過轉換之後，寫進 Oracle DB。
+
+而且這三個 ETL 有幾個共同特性：
+
+第一，它們都是由 API 一次把資料全拿回來。
+第二，資料量其實不大。
+第三，採用的是 Full Load。
+第四，我們要的是整批成功，不然就整批 rollback。
+所以其實不需要太複雜的 partition、parallel，或者 incremental load。
+
+1.3 本次分享重點
+
+今天我大概會分幾個部分來講。
+先講原本 Spring Batch 的架構與限制，
+接著講這次為什麼要重構，
+再來介紹新的 Airflow DAG 架構與核心實作方式，
+最後再分享這次改完之後的效益，以及設計上的 trade-off。
+
+2. 原有系統設計（Spring Batch）
+2.1 原系統整體架構
+
+先講原本的系統。
+
+原本的 PQO-PDMEtl 是一個 Spring Boot 加 Spring Batch 的專案，
+然後由 Kubernetes CronJob 定時去啟動。
+
+所以整體流程可以簡化成：
+
+CronJob 到時間後，啟動 Spring Boot App，
+Spring Boot App 再去執行 Spring Batch Job，
+最後把資料寫進 Oracle DB。
+
+2.2 專案結構
+
+如果看原本的專案結構，其實拆得蠻細的。
+裡面有 batch 資料夾，放 Reader、Processor、Writer、BatchConfig。
+有 model，裡面又分 JPA entity 跟 DTO。
+有 repository 做資料存取。
+另外還有 PDMConfig、PQOConfig，以及 application 入口。
+
+所以這不是單純一支程式在做 ETL，
+而是一整個 Spring Boot / Spring Batch 的專案結構。
+
+2.3 Spring Batch 分層模式
+
+Spring Batch 的典型做法，就是把 ETL 拆成幾個角色：
+
+Reader 負責讀資料，
+Processor 負責轉資料，
+Writer 負責寫資料，
+然後再透過 BatchConfig 去組成 Step 跟 Job。
+
+以 TI_PROC_OPT 為例，就至少要有：
+
+TiProcOptReader、TiProcOptProcessor、TiProcOptWriter。
+
+也就是說，即使 ETL 邏輯本身不複雜，
+還是要拆成多個 class 才能完成。
+
+2.4 原系統架構圖
+
+如果用比較直覺的方式看，原本架構就是：
+
+Kubernetes CronJob 去啟動 Spring Boot，
+Spring Boot 裡面跑 Spring Batch，
+Spring Batch 再透過 Reader 呼叫 API、Processor 做轉換、Writer 寫 DB。
+
+另外 log 也分成 framework log 跟 application log。
+所以整體來說，它比較像是一個完整的應用程式在執行 ETL。
+
+2.5 原系統執行方式
+
+這裡我想稍微講一下原系統實際是怎麼跑的，因為這對後面理解重構價值很重要。
+
+原系統是由 Kubernetes CronJob 定時觸發。
+CronJob 到時間之後，會用 java -jar 去啟動 PQO-PDMETl.jar。
+
+接著 Spring Boot 起來之後，會先載入整個 application context。
+在這個過程中：
+
+PDMConfig.java 會建立 PDM API 的 WebClient
+PQOConfig.java 會建立 Oracle DataSource、JPA 跟 TransactionManager
+BatchConfig.java 會去組裝 Job、Step、Reader、Processor、Writer
+
+等這些都準備好之後，Spring Batch 才開始去執行 Job。
+Job 執行時，就是 Reader、Processor、Writer 這樣一路跑下來。
+最後由 JobCompletionNotificationListener 去記錄 job 成功或失敗，程式就結束。
+
+2.5.1 Job 執行模式
+
+這裡有一個重點，就是原本系統裡面有多個 Job。
+
+當 Spring Boot 啟動之後，這些 Job 會由 Spring Batch 自動執行。
+它們預設是同步、非平行執行，而且執行順序並沒有被明確控制。
+
+這代表原本那三個 ETL Job，其實不是完全彼此獨立的。
+它們是綁在同一個 application process 裡面跑。
+
+如果中間有一個 Job fail，就有可能讓整個 application 結束，
+後面的 Job 也就不會繼續執行。
+
+2.5.2 Transaction 行為補充
+
+這裡還有一個重點是 transaction。
+
+原本 Spring Batch 裡，rollback 不是我們在 code 裡手動寫的，
+而是透過 PlatformTransactionManager 讓 framework 自動處理。
+
+也就是說，當 Step 裡發生 exception 的時候，
+Spring Batch 會自動 rollback 該 transaction。
+
+但這個專案有個比較特別、也比較有風險的地方，
+就是 deleteAll() 並不是在 Step 的 transaction 裡做，
+而是在 Reader 的 @PostConstruct 初始化階段就先做掉了。
+
+這代表 deleteAll() 跟後面的 insert，不一定在同一個 transaction 裡。
+所以如果 delete 已經做完，後面 insert 又失敗，
+就可能出現資料被刪掉了，但新資料沒成功寫進去的狀況。
+
+所以原系統中的 delete 跟 insert，其實沒有完整包在同一個 atomic transaction 裡。
+
+3. 原系統設計特性與實際使用情境
+3.1 Spring Batch 的典型能力
+
+Spring Batch 主要是為大批次資料處理設計的。
+它常見的能力包括：
+
+chunk-based transaction、retry / skip、job / step lifecycle 管理等等。
+這些都很適合資料量大、流程長、容錯需求高的批次處理。
+
+3.2 Chunk-based Transaction 概念
+
+先講 chunk。
+
+Spring Batch 通常會把資料切成 chunk，例如 chunk 設 100。
+概念就是：讀 100 筆、處理 100 筆、寫 100 筆，然後 commit。
+
+這很適合資料量很大、單一 transaction 不宜太大，
+而且可以接受部分 chunk 成功、部分 chunk 失敗的情境。
+
+但在我們這個專案裡，要注意一件事：
+即使有設定 chunk，API 其實還是只會呼叫一次。
+
+因為 Reader 在初始化階段就把 API 資料一次抓回來，放進記憶體了。
+後面 Step 執行時，read 只是從記憶體中的 list 一筆一筆拿資料。
+
+所以在這個案子裡，chunk 影響的是 transaction commit 的邊界，
+不是 API 呼叫次數。
+
+3.3 Retry / Skip 機制
+
+再來是 retry / skip。
+
+Spring Batch 可以設定 fault-tolerant，
+例如某一筆資料失敗時，先 retry 幾次，還是不行就 skip 掉，繼續跑下一筆。
+
+這種機制很適合大資料量、而且允許 dirty data 的情境。
+
+3.3.1 範例說明
+
+例如在 Spring Batch 裡，可以透過 faultTolerant() 搭配 retry()、skip() 來做這件事。
+
+它的概念就是：
+
+某筆資料出錯時，先 retry。
+retry 幾次之後還是不行，再 decide 要不要 skip。
+如果 skip 的數量超過限制，整個 Step 才 fail。
+
+3.3.2 本專案實際情境
+
+但在我們這個專案中，其實沒有使用這類能力。
+
+因為我們的策略不是「允許部分成功、部分失敗」，
+而是「整批成功，或整批 rollback」。
+
+也就是說，只要任一筆資料失敗，就整個 transaction rollback。
+所以這邊沒有啟用 faultTolerant()，
+也沒有用 retry / skip、partition 或 parallel。
+
+3.4 本專案實際需求特性
+
+如果把這個專案的需求抽出來看，特性其實很明確：
+
+每次資料量小
+單一 API 可以一次拿到全部資料
+Full Load 就能滿足需求
+資料一致性比逐筆 skip 更重要
+單一 transaction 即可完成處理
+
+所以它其實不是一個典型的大型 batch 系統。
+
+3.5 差異分析
+
+如果把 Spring Batch 提供的能力，跟這個專案實際需求拿來比，會發現：
+
+chunk 分批 commit，對我們來說不是必要；
+retry / skip，我們不用；
+大量資料處理，也不是我們的場景；
+複雜的 batch lifecycle，對我們這種單一 ETL task 來說也偏重。
+
+3.6 小結
+
+所以這邊的小結就是：
+
+Spring Batch 本身沒有問題，
+但對這個專案來說，出現了「框架能力大於實際需求」的情況。
+
+簡單講，就是為了做一個其實很單純的 API → DB ETL，
+我們卻要維護很多抽象層、很多 class、很多 config。
+
+不是說那些抽象有問題，
+而是它們帶來的成本，已經高過這個案例真正需要的價值。
+
+4. 重構動機與目標
+4.1 重構動機
+
+這次重構主要有三個原因。
+
+第一個，是架構跟需求不匹配。
+因為實際流程就是 Call API、Transform、Insert DB。
+但為了做這件事，要拆成 Reader、Processor、Writer，好幾層 class。
+
+第二個，是 log 與可觀測性問題。
+原本要查一次 ETL 問題，可能要同時看 CronJob、Pod、Spring Boot log、Batch log。
+整個 troubleshooting 視角比較分散。
+
+第三個，是維護成本。
+原系統綁在 Spring Boot、Spring Batch、JPA、JDBC 這整套生態下，
+一旦升版、dependency、CI pipeline 出問題，維護成本就會比較高。
+
+4.2 重構目標
+
+所以這次重構的目標很明確：
+
+第一，降低維護成本。
+第二，簡化架構。
+第三，提升可觀測性。
+第四，統一排程管理。
+第五，提升未來的可擴充性。
+
+4.3 架構轉變
+
+我自己覺得可以用一句話描述這次架構轉變：
+
+原本是 CronJob → Spring Boot → Batch → DB，
+現在變成 Airflow DAG → Python Task → DB。
+
+也就是說，ETL 不再需要透過啟動一個完整應用程式來執行，
+而是直接變成 Airflow workflow 裡的一個 task。
+
+這裡再強調一下，Airflow 本身當然也要啟動。
+但 Airflow 是一個常駐系統。
+跟 Spring Batch 不一樣的是，原本是每次 ETL 執行都要起一整個 Spring Boot application。
+現在是 Airflow 本來就在跑，ETL 只是裡面的一個 task。
+這是兩者執行模型最大的差別。
+
+5. 新系統架構（Airflow DAG）
+5.1 新系統整體架構
+
+重構後，ETL 被整合到 PQO-batch repository 裡，
+由 Airflow DAG 直接進行排程與執行。
+
+整體流程大概就是：
+
+Airflow Scheduler 觸發 DAG，
+DAG 裡的 PythonOperator 去執行 ETL，
+最後寫進 Oracle DB。
+
+5.2 新系統架構圖
+
+如果用圖來看，Airflow Scheduler 會去觸發 DAG，
+DAG 裡的 PythonOperator 會呼叫 pdm_api_full_load_task()。
+這個 framework 再去做 API extract、transform、SQL generate、transaction control，
+以及 perf log 跟 ctrl log。
+
+所以相較於原本的 Spring Batch，
+現在的流程中心點其實變成 Airflow 與共用 ETL framework。
+
+5.3 新系統專案結構
+
+新的專案結構裡最主要的是三支 DAG 檔案：
+
+etl_ti_proc_opt.py、etl_ti_raw_wafer_ques.py、etl_ti_wf_opt_catg.py。
+
+另外有一個 pdm_api_etl_utils，裡面放共用 framework，
+例如 pdm_api_full_load.py 跟 sql_utils.py。
+再搭配 schemas.py 跟 utils.py 去做 log 結構與共用函式。
+
+所以現在不是一個完整應用程式，
+而是一組以 DAG 為核心、以 function 為單位的 ETL 架構。
+
+5.4 架構說明
+
+以 etl_ti_proc_opt.py 為例，它可以拆成四塊來理解。
+
+第一個是 Schedule，也就是排程設定。
+它決定這個 ETL 什麼時候跑。
+
+第二個是 Task，也就是用 PythonOperator 定義實際要執行的任務。
+這邊真正被執行的是 pdm_api_full_load_task()。
+
+第三個是 Transform Logic。
+例如 _process_ti_proc_opt_data，負責資料清洗與欄位轉換。
+
+第四個是 SQL Generation Logic。
+也就是 _generate_ti_proc_opt_insert_sql，把資料轉成 INSERT SQL。
+
+所以簡單講就是：
+
+DAG 決定什麼時候跑，
+Task 決定跑什麼，
+Transform 跟 SQL generation 決定怎麼處理資料。
+
+6. 核心實作方式
+6.1 一表一 DAG
+
+第一個核心設計是一表一 DAG。
+每張表對應一個 DAG。
+
+這樣的好處是：
+
+每個 ETL 都能獨立 rerun，
+失敗隔離比較清楚，
+而且未來如果要調整 schedule 或 retry，也可以單獨處理。
+
+6.2 共用 ETL Framework
+
+第二個核心設計是共用 ETL framework。
+
+這次不是三個 ETL 各自重寫，
+而是把共同流程抽成 pdm_api_full_load_task()。
+
+它的流程很單純：
+
+Extract、Transform、Generate SQL、DELETE、INSERT、Logging。
+
+這樣的好處是，共同行為可以集中管理，
+每個 DAG 只要保留 table-specific 的差異即可。
+未來如果還有類似的 ETL，要擴展會比較快。
+
+6.3 Full Load + Atomic Transaction
+
+第三個重點是 Full Load 加 Atomic Transaction。
+
+這次沿用了既有 Full Load 策略，也就是先 delete 再 insert。
+但跟原本 Spring Batch 版本不同的是，
+現在我們把 DELETE 跟 INSERT 明確放在同一個 transaction 裡面。
+
+所以流程是：
+
+先 call API。
+如果 API 回空資料，就寫 Perf Log 然後結束。
+如果有資料，就 transform、generate SQL，然後開始 transaction。
+
+先做 DELETE。
+如果 DELETE 失敗，就寫 Ctrl Log、rollback、寫 Perf Log，最後讓 task fail。
+如果 DELETE 成功，就做 INSERT。
+如果 INSERT 任一筆失敗，也是一樣走錯誤流程。
+只有全部成功才 commit，再寫 Perf Log。
+
+這樣可以避免出現「刪掉了舊資料，但新資料沒完整寫進去」這種狀況。
+
+6.4 Airflow Retry 機制
+
+另外，Airflow 這邊也有設定 retry。
+所以像 API 短暫異常這種暫時性問題，可以由 Airflow 自動重試。
+
+相較於原本 Spring Batch 版本沒有明確用到 retry / skip，
+現在這部分至少在 task level 是明確且可管理的。
+
+6.5 ETL 控制與績效記錄
+
+這次也整合了 PQO_SYS_ETL_PERF_LOG 跟 PQO_SYS_ETL_CTRL_LOG 兩張表。
+
+PERF_LOG 主要記錄 ETL 名稱、開始與結束時間、總筆數、失敗筆數。
+CTRL_LOG 則記錄失敗資料 key、目標表、錯誤碼與錯誤訊息。
+
+所以現在除了 Airflow 本身的 log 之外，
+也保留了 DB 層級的控制與追蹤資訊。
+
+7. 設計亮點與實際收益
+7.1 架構簡化
+
+第一個很直接的收益就是架構簡化。
+
+原本的 Spring Boot application、Spring Batch Job / Step 組裝、
+Reader / Processor / Writer、JPA entity / repository 依賴，現在都不需要了。
+
+所以 ETL 流程更貼近實際需求本身。
+
+7.2 維護成本下降
+
+第二個是維護成本下降。
+
+這裡我要講得保守一點。
+不是說 Airflow / Python 就完全沒有 CI 或 dependency 問題，
+因為 DAG parsing、provider 相容性、pipeline 還是可能要修。
+
+但相較於原本 Spring Boot 版本，
+現在少掉了很多應用框架層級的建置、打包與升版負擔。
+維護焦點會更集中在 DAG 跟 ETL 邏輯本身。
+
+7.3 可觀測性提升
+
+第三個是可觀測性提升。
+
+現在透過 Airflow UI，可以直接看到：
+
+DAG run 狀態、task success / failed、retry 歷史，以及執行 log。
+
+相比原本要分散去看 CronJob、Pod、Spring Batch log，
+查問題會直覺很多。
+
+7.4 可擴充性提升
+
+第四個是可擴充性提升。
+
+這次把共用流程抽成 framework，
+所以未來若有更多類似 PDM API 到 Oracle 的 ETL，
+可以比較快地複製與擴展。
+
+7.5 Failure Isolation（失敗隔離）
+
+第五個是 failure isolation。
+
+原本三個 ETL Job 綁在同一個 Spring Boot application 裡面，
+如果其中一個 fail，可能導致整個 application 中斷，後續 Job 也跟著受影響。
+
+現在改成 Airflow 後，每個 ETL 都是獨立 DAG，
+某一個 fail，不會影響其他 ETL。
+
+8. Trade-off 與設計取捨
+8.1 SQL 執行策略：row-by-row
+
+第一個 trade-off 是 SQL 執行策略。
+
+目前採用 row-by-row，也就是逐筆執行 INSERT SQL。
+
+原因很簡單：資料量小、邏輯直觀，
+也方便記錄單筆錯誤與 control log。
+
+但代價就是 DB round trip 會比較多。
+如果未來資料量明顯增加，就可以評估 batch insert、parameterized SQL 或 executemany。
+
+8.2 資料同步策略：Full Load
+
+第二個 trade-off 是資料同步策略。
+
+目前採用 Full Load，也就是 DELETE + INSERT，而不是 incremental load。
+
+原因是 API 現在只提供全量資料，沒有提供 update timestamp 或 CDC。
+如果硬做 incremental，反而要自己比對 diff，系統會更複雜。
+
+所以在目前這個條件下，Full Load 其實是比較合理、也比較穩定的做法。
+未來如果 API 能提供變更追蹤資訊，或者資料量顯著增加，再來考慮 incremental load 會比較有價值。
+
+8.3 DAG 設計：單 task 模式
+
+第三個 trade-off 是 DAG 設計。
+
+目前每個 DAG 只有一個 PythonOperator，也就是單 task 模式。
+
+這樣做的原因是，現階段流程很單純：
+單一 API、單一 table、沒有中間層，也沒有複雜的 downstream dependency。
+
+如果現在就把 DAG 拆成很多 task，
+反而會增加 task 間資料傳遞、DAG 複雜度，以及 transaction 邊界管理難度。
+
+但如果未來流程變複雜，例如加入 data validation、stage table、notification、data quality check，
+那就可以再拆成 extract、transform、load、notify 等多個 task，
+進一步提升可觀測性跟錯誤隔離能力。
+
+9. 重構前後比較
+
+如果用一句話總結這張比較表：
+
+原本是 CronJob 啟動應用程式，
+現在是 Airflow 直接執行任務。
+
+技術棧從 Java / Spring Boot / Batch / JPA，
+變成 Python / Airflow。
+
+架構複雜度下降，維護成本下降，可觀測性由分散變集中。
+retry 管理也從原本不明確，變成 Airflow 內建。
+release unit 也從原本比較分散，變成集中在 batch repo 與 DAG。
+
+10. 結論
+10.1 本次重構帶來的效益
+
+最後做個總結。
+
+這次重構成功把原本 PQO-PDMEtl 的 ETL 流程，從 Spring Batch 架構搬到 Airflow DAG。
+這次改造真正的價值，不只是技術棧從 Java 變 Python，
+而是把 ETL 從「應用程式導向的批次程式」，轉成「排程系統導向的資料流程」。
+
+這次重構帶來的效益包括：
+
+維護成本下降、架構簡化、可觀測性提升、排程與任務管理整合、
+同時保留既有 Full Load 與資料一致性策略，也提升了未來擴充與複用能力。
+
+10.2 最後總結
+
+所以對這種：
+
+資料量小、Full Load、流程單純，而且需要排程與監控整合的 ETL 任務來說，
+我認為 Airflow DAG 比 Spring Batch 更符合實際需求，
+也更適合作為部門內類似批次任務的實作模式。
+
+我的分享大概到這邊，謝謝大家。
