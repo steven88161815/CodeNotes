@@ -1,11 +1,9 @@
 1. 背景與任務目標
 
-各位好，今天想跟大家分享一下，我這次做的一個 ETL 重構任務。
-主題是把原本 PQO-PDMEtl 裡面用 Spring Batch 寫的 ETL，搬到 PQO-batch repository，改成用 Airflow DAG 來實作。
+各位好，今天想跟大家分享一下，我近期做的一個 ETL 重構任務。
+主題是把原本 PQO-PDMEtl 裡面用 Spring Batch 寫的 ETL，搬到 PQO-batch repository，並改成用 Airflow DAG 來實作。
 
-這次重構我覺得最重要的點，其實不只是把 Java 改成 Python。
-真正的核心轉變是，原本我們的 ETL 比較像是一個「要被啟動的應用程式」，
-現在則變成 Airflow workflow 裡面的一個 task。
+真正的轉變不是 Java 改 Python，而是 ETL 從「一個要被啟動的程式」，變成「排程系統裡的一個任務」。
 
 也就是說，原本是到時間後先啟動一個 Spring Boot application，
 再由裡面的 Spring Batch 去執行 ETL。
@@ -39,9 +37,11 @@ PDM API 的資料，經過轉換之後，寫進 Oracle DB。
 
 今天我大概會分幾個部分來講。
 先講原本 Spring Batch 的架構與限制，
-接著講這次為什麼要重構，
+接著講本次重構的動機與目標，
 再來介紹新的 Airflow DAG 架構與核心實作方式，
 最後再分享這次改完之後的效益，以及設計上的 trade-off。
+
+======================================================================================================================================================================================
 
 2. 原有系統設計（Spring Batch）
 2.1 原系統整體架構
@@ -51,7 +51,7 @@ PDM API 的資料，經過轉換之後，寫進 Oracle DB。
 原本的 PQO-PDMEtl 是一個 Spring Boot 加 Spring Batch 的專案，
 然後由 Kubernetes CronJob 定時去啟動。
 
-所以整體流程可以簡化成：
+所以整體流程簡單來說就是：
 
 CronJob 到時間後，啟動 Spring Boot App，
 Spring Boot App 再去執行 Spring Batch Job，
@@ -97,63 +97,123 @@ Spring Batch 再透過 Reader 呼叫 API、Processor 做轉換、Writer 寫 DB�
 
 2.5 原系統執行方式
 
-這裡我想稍微講一下原系統實際是怎麼跑的，因為這對後面理解重構價值很重要。
+這一段我想說明一下原本系統是怎麼執行 ETL 的。
 
-原系統是由 Kubernetes CronJob 定時觸發。
-CronJob 到時間之後，會用 java -jar 去啟動 PQO-PDMETl.jar。
+整體流程可以分成幾個步驟。
 
-接著 Spring Boot 起來之後，會先載入整個 application context。
-在這個過程中：
+首先，是由 Kubernetes 的 CronJob 負責排程。
 
-PDMConfig.java 會建立 PDM API 的 WebClient
-PQOConfig.java 會建立 Oracle DataSource、JPA 跟 TransactionManager
-BatchConfig.java 會去組裝 Job、Step、Reader、Processor、Writer
+時間一到之後，會透過 java -jar 去啟動這個 Spring Boot 應用程式。
 
-等這些都準備好之後，Spring Batch 才開始去執行 Job。
-Job 執行時，就是 Reader、Processor、Writer 這樣一路跑下來。
-最後由 JobCompletionNotificationListener 去記錄 job 成功或失敗，程式就結束。
+接著，Spring Boot 啟動之後，會先建立整個 application context，
 
-2.5.1 Job 執行模式
+也就是把所有 Spring 的元件都初始化起來。
 
-這裡有一個重點，就是原本系統裡面有多個 Job。
+在這個階段，會同時完成幾件事情：
 
-當 Spring Boot 啟動之後，這些 Job 會由 Spring Batch 自動執行。
-它們預設是同步、非平行執行，而且執行順序並沒有被明確控制。
+例如建立 PDM API 的 WebClient、
+建立 Oracle 的 DataSource、JPA、TransactionManager，
+以及把 Spring Batch 的 Job、Step、Reader、Processor、Writer 全部組裝起來。
 
-這代表原本那三個 ETL Job，其實不是完全彼此獨立的。
-它們是綁在同一個 application process 裡面跑。
+當這些都準備好之後，
 
-如果中間有一個 Job fail，就有可能讓整個 application 結束，
-後面的 Job 也就不會繼續執行。
+Spring Batch 會自動開始執行 Job，
 
-2.5.2 Transaction 行為補充
+並依照設定好的流程，依序執行：
 
-這裡還有一個重點是 transaction。
+👉 Reader → Processor → Writer
 
-原本 Spring Batch 裡，rollback 不是我們在 code 裡手動寫的，
-而是透過 PlatformTransactionManager 讓 framework 自動處理。
+等整個 Job 執行完之後，
 
-也就是說，當 Step 裡發生 exception 的時候，
+會透過 listener 記錄這次執行是成功還是失敗，
+
+然後整個 application 就結束。
+
+🎤 2.5.1 Job 執行模式
+
+再補充一下 Job 的執行方式。
+
+在這個架構裡，其實是定義了多個 Job，
+
+每一個 Job 對應一個 ETL。
+
+當 Spring Boot 啟動時，這些 Job 會被自動執行。
+
+👉 這裡有幾個特性：
+
+第一，Job 預設是同步執行的，不是平行。
+
+第二，執行順序是由 Spring container 決定的，沒有特別控制。
+
+第三點比較重要：
+
+👉 如果發生未處理的 exception，
+
+是有可能讓整個 application 中斷的，
+
+進而影響後續 Job 的執行。
+
+也就是說，這些 ETL Job 雖然邏輯上是分開的，
+
+但實際上是綁在同一個 application process 裡，
+
+並不是完全獨立的。
+
+🎤 2.5.2 Transaction 行為補充
+
+最後補充一下 transaction 的部分。
+
+在這個專案中，是使用 JPA 的 transaction manager，
+
+所以在 Step 執行過程中，如果發生 exception，
+
 Spring Batch 會自動 rollback 該 transaction。
 
-但這個專案有個比較特別、也比較有風險的地方，
-就是 deleteAll() 並不是在 Step 的 transaction 裡做，
-而是在 Reader 的 @PostConstruct 初始化階段就先做掉了。
+👉 但這裡有一個設計上的問題。
 
-這代表 deleteAll() 跟後面的 insert，不一定在同一個 transaction 裡。
-所以如果 delete 已經做完，後面 insert 又失敗，
-就可能出現資料被刪掉了，但新資料沒成功寫進去的狀況。
+原本的程式裡，deleteAll() 是在 Reader 初始化的時候執行，
 
-所以原系統中的 delete 跟 insert，其實沒有完整包在同一個 atomic transaction 裡。
+也就是在 @PostConstruct 階段。
+
+👉 這個時間點，其實是在 transaction 之外。
+
+所以會變成：
+
+delete 在 transaction 外執行
+insert 在 transaction 內執行
+
+👉 如果 insert 失敗：
+
+transaction 會 rollback，但 delete 不會回復。
+
+👉 就會出現一種狀況：
+
+資料已經被刪掉了，但新資料沒有寫成功。
+
+這代表：
+
+👉 delete 跟 insert 並不在同一個 transaction 裡，
+
+也就是不具備完整的 atomicity，
+
+存在資料不一致的風險。
+
+了解原本怎麼跑之後，接下來想再往下看，Spring Batch 這個框架本身擅長什麼，以及這些能力跟我們的需求到底合不合。
+
+======================================================================================================================================================================================
 
 3. 原系統設計特性與實際使用情境
 3.1 Spring Batch 的典型能力
 
 Spring Batch 主要是為大批次資料處理設計的。
-它常見的能力包括：
 
-chunk-based transaction、retry / skip、job / step lifecycle 管理等等。
-這些都很適合資料量大、流程長、容錯需求高的批次處理。
+它常見的能力包括：
+chunk-based transaction、retry / skip 機制，還有 partition / parallel。
+
+這些能力其實都很適合：
+
+資料量很大、處理時間很長，
+或者需要一定容錯能力的批次任務。
 
 3.2 Chunk-based Transaction 概念
 
@@ -165,78 +225,83 @@ Spring Batch 通常會把資料切成 chunk，例如 chunk 設 100。
 這很適合資料量很大、單一 transaction 不宜太大，
 而且可以接受部分 chunk 成功、部分 chunk 失敗的情境。
 
-但在我們這個專案裡，要注意一件事：
-即使有設定 chunk，API 其實還是只會呼叫一次。
-
-因為 Reader 在初始化階段就把 API 資料一次抓回來，放進記憶體了。
-後面 Step 執行時，read 只是從記憶體中的 list 一筆一筆拿資料。
-
-所以在這個案子裡，chunk 影響的是 transaction commit 的邊界，
-不是 API 呼叫次數。
+但在我們這個專案裡，其實資料量很小，  
+所以這種 chunk-based 的設計，實際上沒有太大必要。
 
 3.3 Retry / Skip 機制
 
-再來是 retry / skip。
+接著補充一下 Spring Batch 的 fault-tolerant 機制，
+因為這也是 Spring Batch 常被拿來處理批次資料的一個重要能力。
 
-Spring Batch 可以設定 fault-tolerant，
-例如某一筆資料失敗時，先 retry 幾次，還是不行就 skip 掉，繼續跑下一筆。
+在 Spring Batch 裡，可以透過 faultTolerant() 搭配 retry() 跟 skip() 來處理單筆資料失敗的情況。
 
-這種機制很適合大資料量、而且允許 dirty data 的情境。
+它的概念是這樣：
 
-3.3.1 範例說明
+當某一筆資料在處理過程中發生 exception 時，
+系統不一定會立刻讓整個 Step fail，
+而是可以先判斷：這個錯誤要不要重試，或者能不能直接跳過。
 
-例如在 Spring Batch 裡，可以透過 faultTolerant() 搭配 retry()、skip() 來做這件事。
+例如在這個範例裡：
 
-它的概念就是：
+retry(Exception.class) 表示某些 exception 發生時，可以先重試
+retryLimit(3) 表示最多重試 3 次
+如果重試之後還是失敗，再看這個錯誤是否符合 skip(Exception.class)
+如果符合，就可以跳過該筆資料，繼續處理下一筆
+但 skip 也不是無限制的，skipLimit(10) 表示最多只能跳過 10 筆
+如果超過這個數量，整個 Step 還是會 fail
 
-某筆資料出錯時，先 retry。
-retry 幾次之後還是不行，再 decide 要不要 skip。
-如果 skip 的數量超過限制，整個 Step 才 fail。
+所以它的執行概念可以理解成：
 
-3.3.2 本專案實際情境
+某一筆資料出錯時，
+先嘗試 retry；
+retry 幾次還是失敗，就決定是否 skip；
+如果 skip 太多筆，代表資料品質問題已經超過可接受範圍，那整個 Step 就會 fail。
 
-但在我們這個專案中，其實沒有使用這類能力。
+這種設計很適合用在大量資料處理的情境。
+因為在大批次資料裡，常常會遇到少數資料有問題，
+如果每一筆錯誤都直接讓整個 job 中止，成本會很高。
+所以 Spring Batch 才會提供這種「允許少量資料失敗，但整體流程仍可繼續」的機制。
 
-因為我們的策略不是「允許部分成功、部分失敗」，
-而是「整批成功，或整批 rollback」。
+不過這種做法也有一個前提，
+就是業務上必須接受「部分資料成功、部分資料被跳過」這件事。
+如果業務要求的是整批資料必須完全一致，那就不適合用這種模式。
 
-也就是說，只要任一筆資料失敗，就整個 transaction rollback。
-所以這邊沒有啟用 faultTolerant()，
-也沒有用 retry / skip、partition 或 parallel。
+另外，Spring Batch 其實也支援 partition 或 parallel processing，
+可以用多個 thread 同時處理資料。
 
-3.4 本專案實際需求特性
+但在我們這個案例裡，資料量不到 100 筆，
+所以這類能力其實也完全用不到。
 
-如果把這個專案的需求抽出來看，特性其實很明確：
-
-每次資料量小
-單一 API 可以一次拿到全部資料
-Full Load 就能滿足需求
-資料一致性比逐筆 skip 更重要
-單一 transaction 即可完成處理
-
-所以它其實不是一個典型的大型 batch 系統。
-
-3.5 差異分析
+3.4 差異分析
 
 如果把 Spring Batch 提供的能力，跟這個專案實際需求拿來比，會發現：
 
-chunk 分批 commit，對我們來說不是必要；
-retry / skip，我們不用；
-大量資料處理，也不是我們的場景；
-複雜的 batch lifecycle，對我們這種單一 ETL task 來說也偏重。
+chunk 分批 commit → 我們單一 transaction 就夠
+retry / skip → 我們採整批 rollback
+partition / parallel → 資料量太小，用不到
 
-3.6 小結
+👉 可以看到，大部分能力其實都沒有用到
+
+
+3.5 小結
 
 所以這邊的小結就是：
 
 Spring Batch 本身沒有問題，
 但對這個專案來說，出現了「框架能力大於實際需求」的情況。
 
-簡單講，就是為了做一個其實很單純的 API → DB ETL，
-我們卻要維護很多抽象層、很多 class、很多 config。
+為了支援 chunk、retry、大資料處理等能力，
+我們引入了比較多的抽象層與設計複雜度。
 
-不是說那些抽象有問題，
-而是它們帶來的成本，已經高過這個案例真正需要的價值。
+但實際上這個 ETL：
+
+資料量小
+不需要 retry / skip
+一個 transaction 就可以完成
+
+因此整體架構相對「過重」，也增加了維護成本。
+
+======================================================================================================================================================================================
 
 4. 重構動機與目標
 4.1 重構動機
@@ -256,154 +321,339 @@ Spring Batch 本身沒有問題，
 一旦升版、dependency、CI pipeline 出問題，維護成本就會比較高。
 
 4.2 重構目標
+所以這次重構的目標，其實蠻明確的，我大概整理成五個方向。
 
-所以這次重構的目標很明確：
+第一個是降低維護成本。
+原本的系統綁在 Spring Boot、Spring Batch、JPA 這一整套生態上，
+當版本升級或 CI pipeline 出問題時，維護成本其實不低。
+所以這次希望把這些不必要的框架負擔降下來，讓後續維護更單純。
 
-第一，降低維護成本。
-第二，簡化架構。
-第三，提升可觀測性。
-第四，統一排程管理。
-第五，提升未來的可擴充性。
+第二個是簡化架構。
+因為這個 ETL 的本質其實就是「Call API → Transform → Insert DB」，
+但原本實作上卻要拆成 Reader、Processor、Writer 多個 class。
+所以我們希望讓架構更貼近實際流程，而不是為了框架去配合設計。
+
+第三個是提升可觀測性。
+原本如果要查問題，需要同時看 CronJob、Pod、Spring Boot log、Batch log，
+整個 troubleshooting 其實是分散的。
+這次希望透過 Airflow，把 task 狀態、retry、log 都集中在同一個地方觀察。
+
+第四個是統一排程管理。
+以前是用 Kubernetes CronJob 做排程，
+現在希望把排程、retry、監控這些能力，都集中在 Airflow 裡面處理，
+讓整個 ETL 的 lifecycle 更一致、也更好管理。
+
+第五個是提升未來的可擴充性。
+因為這次的 ETL pattern 其實蠻固定的，就是 API → DB。
+所以希望把共用邏輯抽出來，未來如果有新的 ETL，可以直接 reuse，
+而不是每次都重寫一套新的 Batch 程式。
 
 4.3 架構轉變
 
-我自己覺得可以用一句話描述這次架構轉變：
+我這邊想用一個比較簡單的方式，來講這次的架構轉變。
 
-原本是 CronJob → Spring Boot → Batch → DB，
-現在變成 Airflow DAG → Python Task → DB。
+以前我們的做法是這樣：
 
-也就是說，ETL 不再需要透過啟動一個完整應用程式來執行，
-而是直接變成 Airflow workflow 裡的一個 task。
+系統會先用 CronJob 設定好時間，
+時間一到之後，就會啟動一個 Spring Boot 的應用程式，
+然後再由裡面的 Spring Batch 去把整個 ETL 流程跑完，最後把資料寫進資料庫。
 
-這裡再強調一下，Airflow 本身當然也要啟動。
-但 Airflow 是一個常駐系統。
-跟 Spring Batch 不一樣的是，原本是每次 ETL 執行都要起一整個 Spring Boot application。
-現在是 Airflow 本來就在跑，ETL 只是裡面的一個 task。
-這是兩者執行模型最大的差別。
+但現在改成 Airflow 之後，整個方式就不太一樣了。
+
+現在是由 Airflow 去負責排程，
+時間到了之後，直接執行一個 DAG 裡面的 task，
+這個 task 就是一段 Python 程式，負責把 ETL 做完，然後寫進資料庫。
+
+👉 這裡最大的差別其實是：
+
+以前 ETL 比較像是一個「要被啟動的應用程式」，
+現在則是變成 workflow 裡面的一個「任務」。
+
+所以 ETL 的角色就變成：
+
+👉 一個被排程系統直接執行的任務，
+而不是一個需要自己啟動的應用程式。
+
+這也是這次改動最核心的地方：
+
+從原本比較偏 application-driven 的方式，
+轉成 workflow-driven 的方式。
+
+======================================================================================================================================================================================
 
 5. 新系統架構（Airflow DAG）
+
+接下來這一章，我會介紹重構之後的新系統架構，也就是 Airflow DAG 的設計。
+我先從檔案結構講起，這樣等一下再看圖會比較容易理解每個元件扮演的角色。
+
 5.1 新系統整體架構
 
-重構後，ETL 被整合到 PQO-batch repository 裡，
-由 Airflow DAG 直接進行排程與執行。
+在重構之後，原本的 ETL 不再是一個獨立的應用程式，
+而是被整合到 PQO-batch 這個 repository 裡面。
 
-整體流程大概就是：
+整個執行流程可以簡單理解成：
 
-Airflow Scheduler 觸發 DAG，
-DAG 裡的 PythonOperator 去執行 ETL，
-最後寫進 Oracle DB。
+Airflow 會負責排程，
+時間到了之後觸發一個 DAG，
+DAG 裡面的 task 會去執行 ETL，
+最後把資料寫進 Oracle DB。
 
-5.2 新系統架構圖
+換句話說，現在的流程是：
 
-如果用圖來看，Airflow Scheduler 會去觸發 DAG，
-DAG 裡的 PythonOperator 會呼叫 pdm_api_full_load_task()。
-這個 framework 再去做 API extract、transform、SQL generate、transaction control，
-以及 perf log 跟 ctrl log。
+👉 Airflow 負責「什麼時候跑」
+👉 Python task 負責「怎麼處理資料」
 
-所以相較於原本的 Spring Batch，
-現在的流程中心點其實變成 Airflow 與共用 ETL framework。
+5.2 新系統專案結構
 
-5.3 新系統專案結構
+接著看一下新的專案結構。
 
-新的專案結構裡最主要的是三支 DAG 檔案：
+整個 ETL 的實作主要集中在 app/dags 這個資料夾裡面。
 
-etl_ti_proc_opt.py、etl_ti_raw_wafer_ques.py、etl_ti_wf_opt_catg.py。
+裡面可以分成幾個區塊來理解：
 
-另外有一個 pdm_api_etl_utils，裡面放共用 framework，
-例如 pdm_api_full_load.py 跟 sql_utils.py。
-再搭配 schemas.py 跟 utils.py 去做 log 結構與共用函式。
+第一類：DAG 定義（每個 table 一支）
 
-所以現在不是一個完整應用程式，
-而是一組以 DAG 為核心、以 function 為單位的 ETL 架構。
+像是：
 
-5.4 架構說明
+etl_ti_proc_opt.py
+etl_ti_raw_wafer_ques.py
+etl_ti_wf_opt_catg.py
 
-以 etl_ti_proc_opt.py 為例，它可以拆成四塊來理解。
+👉 這三支檔案，各自對應一個 ETL 任務。
 
-第一個是 Schedule，也就是排程設定。
-它決定這個 ETL 什麼時候跑。
+以 etl_ti_proc_opt.py 為例
 
-第二個是 Task，也就是用 PythonOperator 定義實際要執行的任務。
-這邊真正被執行的是 pdm_api_full_load_task()。
+這支 DAG 檔，其實可以拆成四個部分來看：
 
-第三個是 Transform Logic。
-例如 _process_ti_proc_opt_data，負責資料清洗與欄位轉換。
+第一個是 Schedule（排程）
 
-第四個是 SQL Generation Logic。
-也就是 _generate_ti_proc_opt_insert_sql，把資料轉成 INSERT SQL。
+就是在 DAG 裡面設定 cron expression，
+決定這個 ETL 什麼時候執行。
 
-所以簡單講就是：
+第二個是 Task（任務）
 
-DAG 決定什麼時候跑，
-Task 決定跑什麼，
-Transform 跟 SQL generation 決定怎麼處理資料。
+這裡會用 PythonOperator 定義一個 task，
+實際執行的是 pdm_api_full_load_task 這個 function。
+
+👉 也就是 ETL 的核心邏輯入口
+
+第三個是 Transform Logic（資料轉換）
+
+例如 _process_ti_proc_opt_data，
+負責資料清洗、欄位轉換。
+
+第四個是 SQL Generation Logic（SQL 組裝）
+
+像 _generate_ti_proc_opt_insert_sql，
+負責把資料轉成 INSERT SQL。
+
+👉 所以這一層可以簡單理解成：
+
+DAG：控制排程與流程
+function：負責實際資料處理
+
+第二類：共用 ETL framework
+
+在 pdm_api_etl_utils 裡面，有一個很重要的檔案：
+
+👉 pdm_api_full_load.py
+
+這是這次重構的核心。
+
+它負責整個 ETL 的流程，包括：
+
+呼叫 PDM API
+做資料轉換
+產生 SQL
+控制 DELETE + INSERT transaction
+寫入 log
+
+👉 可以把它想成「ETL 的主引擎」
+
+另外還有：
+
+sql_utils.py：負責 SQL 值處理
+schemas.py：定義 log table 的結構
+utils.py：放一些共用工具，例如 DB 操作、錯誤處理
+
+👉 所以整體設計是：
+
+DAG 負責編排
+utils / framework 負責 execution
+
+5.3 新系統架構圖
+
+最後用一張圖來看整體流程。
+
+Airflow Scheduler 會去觸發 DAG，
+DAG 裡面的 PythonOperator 會呼叫 pdm_api_full_load_task。
+
+然後這個 task 會做幾件事情：
+
+先去 call PDM API
+做資料轉換
+產生 SQL
+控制 transaction（DELETE + INSERT）
+
+最後把資料寫進 Oracle DB。
+
+======================================================================================================================================================================================
 
 6. 核心實作方式
+
+接下來這一章，我會講比較偏實作面的設計，
+也就是這次 ETL 在 Airflow 上是怎麼落地的。
+
 6.1 一表一 DAG
 
-第一個核心設計是一表一 DAG。
-每張表對應一個 DAG。
+第一個設計是「一張表對應一個 DAG」。
 
-這樣的好處是：
+也就是說，每一個 ETL 任務，都有自己獨立的一個 DAG。
 
-每個 ETL 都能獨立 rerun，
-失敗隔離比較清楚，
-而且未來如果要調整 schedule 或 retry，也可以單獨處理。
+像是：
+
+TI_PROC_OPT 對應一個 DAG
+TI_RAW_WAFER_QUES 對應一個 DAG
+TI_WF_OPT_CATG 對應一個 DAG
+
+👉 這樣做有幾個好處：
+
+第一個是 失敗隔離很清楚
+
+某一個 ETL 壞掉，不會影響其他的。
+
+第二個是 可以單獨 rerun
+
+如果某一張表有問題，只需要 rerun 那一個 DAG 就好。
+
+第三個是 排程跟 retry 可以分開調整
+
+不同 ETL 可以有不同 schedule，也可以有不同 retry 策略。
 
 6.2 共用 ETL Framework
 
-第二個核心設計是共用 ETL framework。
+第二個設計是，我們沒有把三個 ETL 各自重寫一份。
 
-這次不是三個 ETL 各自重寫，
-而是把共同流程抽成 pdm_api_full_load_task()。
+而是把共通邏輯抽出來，做成一個共用的 ETL framework，
+也就是 pdm_api_full_load_task()。
 
-它的流程很單純：
+整個流程其實很單純：
 
-Extract、Transform、Generate SQL、DELETE、INSERT、Logging。
+👉 先抓資料 → 做轉換 → 產生 SQL → 刪舊資料 → 寫新資料 → 記錄 log
 
-這樣的好處是，共同行為可以集中管理，
-每個 DAG 只要保留 table-specific 的差異即可。
-未來如果還有類似的 ETL，要擴展會比較快。
+👉 這樣設計的好處是：
+
+所有共同行為都集中在同一個地方管理。
+
+所以每個 DAG 只需要關注：
+
+👉「這張表的資料怎麼轉」
+👉「SQL 長怎樣」
+
+未來如果再新增類似的 ETL，
+基本上只要複製一支 DAG，再補上 transform 跟 SQL function 就可以了。
 
 6.3 Full Load + Atomic Transaction
 
-第三個重點是 Full Load 加 Atomic Transaction。
+第三個設計是資料寫入策略。
 
-這次沿用了既有 Full Load 策略，也就是先 delete 再 insert。
-但跟原本 Spring Batch 版本不同的是，
-現在我們把 DELETE 跟 INSERT 明確放在同一個 transaction 裡面。
+這邊我們沿用原本的 Full Load，也就是：
 
-所以流程是：
+👉 先 DELETE，再 INSERT
 
-先 call API。
-如果 API 回空資料，就寫 Perf Log 然後結束。
-如果有資料，就 transform、generate SQL，然後開始 transaction。
+但這次有特別強調一件事：
 
-先做 DELETE。
-如果 DELETE 失敗，就寫 Ctrl Log、rollback、寫 Perf Log，最後讓 task fail。
-如果 DELETE 成功，就做 INSERT。
-如果 INSERT 任一筆失敗，也是一樣走錯誤流程。
-只有全部成功才 commit，再寫 Perf Log。
+👉 整個過程要包在同一個 transaction 裡面
 
-這樣可以避免出現「刪掉了舊資料，但新資料沒完整寫進去」這種狀況。
+也就是：
+
+刪除成功、插入也成功 → 才 commit
+只要中間有任何一步失敗 → 就全部 rollback
+
+👉 這樣可以確保資料不會出現：
+
+刪掉了，但新資料沒寫進來
+或是只寫了一部分資料的狀況
+
+換句話說，就是保證資料的一致性。
 
 6.4 Airflow Retry 機制
 
-另外，Airflow 這邊也有設定 retry。
-所以像 API 短暫異常這種暫時性問題，可以由 Airflow 自動重試。
+再來是 retry。
 
-相較於原本 Spring Batch 版本沒有明確用到 retry / skip，
-現在這部分至少在 task level 是明確且可管理的。
+在原本的 Spring Batch 裡，其實沒有明確用 retry / skip。
+
+但在 Airflow 裡，我們可以直接在 task level 設定 retry。
+
+像這裡設定：
+
+最多 retry 5 次
+每次間隔 10 秒
+並且會做 exponential backoff
+
+👉 這樣的好處是：
+
+如果遇到像 API 暫時 timeout、或網路不穩這種「暫時性問題」，
+Airflow 會自動幫我們重試，不需要人工介入。
 
 6.5 ETL 控制與績效記錄
 
-這次也整合了 PQO_SYS_ETL_PERF_LOG 跟 PQO_SYS_ETL_CTRL_LOG 兩張表。
+除了 Airflow 自己的 log 之外，
+我們還額外寫了兩張 DB log table。
 
-PERF_LOG 主要記錄 ETL 名稱、開始與結束時間、總筆數、失敗筆數。
-CTRL_LOG 則記錄失敗資料 key、目標表、錯誤碼與錯誤訊息。
+第一張是 PERF_LOG
 
-所以現在除了 Airflow 本身的 log 之外，
-也保留了 DB 層級的控制與追蹤資訊。
+主要記錄整個 ETL 的執行情況，例如：
+
+跑多久
+處理幾筆資料
+成功或失敗
+
+第二張是 CTRL_LOG
+
+這張比較偏錯誤細節，會記錄：
+
+哪一筆資料出錯
+錯在哪裡
+error code 是什麼
+
+👉 這樣的好處是：
+
+即使不看 Airflow log，
+也可以直接從 DB 查到 ETL 的執行情況與錯誤資訊。
+
+6.6 小結（流程）
+
+最後用一個流程來總結整個 ETL 的執行方式。
+
+整體流程是這樣：
+
+一開始先 call API，
+如果沒有資料，就直接寫一筆 perf log 結束。
+
+如果有資料，就會進入：
+
+👉 transform → 產生 SQL → 開 transaction
+
+接著會先做 DELETE，
+如果 DELETE 失敗，就會：
+
+👉 寫 ctrl log → rollback → 寫 perf log → task fail
+
+如果 DELETE 成功，就會做 INSERT，
+如果 INSERT 過程中有任何一筆失敗，也會走同一條錯誤流程。
+
+只有在全部 INSERT 成功的情況下，才會 commit，
+然後寫 perf log，整個流程才算完成。
+
+👉 所以整體可以理解成：
+
+正常流程走 commit，
+錯誤流程全部集中 rollback + logging。
+
+所以整個設計的重點，就是把正常流程跟錯誤流程都明確定義出來，並確保資料一致性。
+
+======================================================================================================================================================================================
 
 7. 設計亮點與實際收益
 7.1 架構簡化
@@ -413,13 +663,13 @@ CTRL_LOG 則記錄失敗資料 key、目標表、錯誤碼與錯誤訊息。
 原本的 Spring Boot application、Spring Batch Job / Step 組裝、
 Reader / Processor / Writer、JPA entity / repository 依賴，現在都不需要了。
 
-所以 ETL 流程更貼近實際需求本身。
+也就是說，我們把很多「為了框架而存在的結構」拿掉了，
+讓程式更貼近實際需求。
 
 7.2 維護成本下降
 
 第二個是維護成本下降。
 
-這裡我要講得保守一點。
 不是說 Airflow / Python 就完全沒有 CI 或 dependency 問題，
 因為 DAG parsing、provider 相容性、pipeline 還是可能要修。
 
@@ -433,9 +683,11 @@ Reader / Processor / Writer、JPA entity / repository 依賴，現在都不需�
 
 現在透過 Airflow UI，可以直接看到：
 
-DAG run 狀態、task success / failed、retry 歷史，以及執行 log。
+DAG 有沒有成功
+哪個 task fail
+retry 幾次
+log 是什麼
 
-相比原本要分散去看 CronJob、Pod、Spring Batch log，
 查問題會直覺很多。
 
 7.4 可擴充性提升
@@ -454,7 +706,7 @@ DAG run 狀態、task success / failed、retry 歷史，以及執行 log。
 如果其中一個 fail，可能導致整個 application 中斷，後續 Job 也跟著受影響。
 
 現在改成 Airflow 後，每個 ETL 都是獨立 DAG，
-某一個 fail，不會影響其他 ETL。
+所以一個 ETL fail，不會影響其他 ETL。
 
 8. Trade-off 與設計取捨
 8.1 SQL 執行策略：row-by-row
