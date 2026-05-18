@@ -278,61 +278,36 @@ stepBuilderFactory.get("step")
 
 ## 3.3 Retry / Skip 機制
   
-  以下為典型 Spring Batch fault-tolerant 設定：
+這邊再補充 Spring Batch 的 retry / skip 機制。
 
-```java
-stepBuilderFactory.get("step")  
-.<Input, Output>chunk(100)  
-.reader(reader)  
-.processor(processor)  
-.writer(writer)  
-.faultTolerant()  
-.retry(Exception.class)  
-.retryLimit(3)  
-.skip(Exception.class)  
-.skipLimit(10)  
-.build();
-```
+Spring Batch 除了 chunk-based transaction 之外，也有 fault-tolerant 的設計。
+它可以針對特定 exception 設定 retry 或 skip。
 
-### 行為說明
+比較精準地說，retry / skip 不是單純所有錯誤都重試或跳過，
+而是要先定義哪些 exception 是可以 retry，哪些 exception 是可以 skip。
 
-當某一筆資料處理發生 exception 時：
+例如某些暫時性的錯誤，可以設定 retry；
+某些單筆資料格式錯誤，如果業務可以接受，也可以設定 skip。
 
-1. **Retry 機制**
-    - 若符合 `retry(Exception.class)`
-    - 最多重試 3 次（`retryLimit(3)`）
-2. **Skip 機制**
-    - 若 retry 後仍失敗
-    - 且符合 `skip(Exception.class)`
-    - 則跳過該筆資料，繼續處理下一筆
-3. **Skip Limit**
-    - 若累計 skip 筆數超過 10 筆（`skipLimit(10)`）
-    - 則整個 Step fail
+retryLimit 是用來限制重試上限，
+skipLimit 則是限制最多可以略過幾筆資料。
 
----
+如果錯誤不符合 retry 或 skip 的條件，
+或者 skip 數量超過上限，
+那整個 Step 還是會 fail。
 
-### 執行概念
+所以這個機制的重點是：
+在大量資料處理時，如果只有少數資料有問題，
+可以避免單筆資料錯誤就讓整個批次立即中止。
 
-```
-資料1 → OK
-資料2 → Retry → OK
-資料3 → Retry → Retry → Fail → Skip
-資料4 → OK
-...
-```
+不過這種設計有一個前提，
+就是業務上要接受部分資料被 skip。
 
----
+但在我們這個專案裡，需求不是部分成功，
+而是整批成功或整批 rollback。
 
-### 設計目的
-
-此機制適用於以下情境：
-
-- 資料量大
-- 個別資料可能有問題（dirty data）
-- 不希望單筆錯誤影響整體批次
-
-然而，在本專案中並未採用此機制，而是選擇整批成功或整批 rollback 的策略。
-因此 retry / skip 雖然是 Spring Batch 的重要能力，但在本專案情境下並不適用。
+所以 retry / skip 雖然是 Spring Batch 很重要的能力，
+但在我們這個 ETL 情境下並不適用。
 
 ---
 
