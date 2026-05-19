@@ -659,7 +659,8 @@ Extract → Transform → Generate SQL → DELETE → INSERT → Logging
 
 以下以 BPMN-style 流程圖表示 ETL 的主流程、空資料處理，以及錯誤處理流程。
 
-![[pqo_pdm_full_load_etl_drawio.drawio 1.png]]
+<img width="611" height="1305" alt="pqo_pdm_full_load_etl_drawio drawio" src="https://github.com/user-attachments/assets/caa1a265-d9ba-4329-82da-04dd43f1f4a0" />
+
 
 
 ---
