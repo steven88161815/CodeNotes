@@ -219,14 +219,24 @@ chunk-based transaction、retry / skip 機制，還有 partition / parallel。
 
 先講 chunk。
 
-Spring Batch 通常會把資料切成 chunk，例如 chunk 設 100。
-概念就是：讀 100 筆、處理 100 筆、寫 100 筆，然後 commit。
+比較精準地說，chunk 是 Spring Batch 用來控制 transaction 邊界的單位。
 
-這很適合資料量很大、單一 transaction 不宜太大，
-而且可以接受部分 chunk 成功、部分 chunk 失敗的情境。
+例如 chunk size 設 100，Spring Batch 會持續呼叫 Reader 取得 item，
+每一筆 item 經過 Processor 處理後，先暫存在目前這個 chunk 裡。
 
-但在我們這個專案裡，其實資料量很小，  
-所以這種 chunk-based 的設計，實際上沒有太大必要。
+當累積到 100 筆時，才會交給 Writer 一次寫入，
+接著 commit 這個 chunk 的 transaction。
+
+所以 chunk 的重點不是「一次從來源抓 100 筆」，
+而是「累積 100 個 item 後 write 並 commit」。
+
+至於來源資料是不是分批取得，其實取決於 Reader 的實作方式。
+如果 Reader 本身支援 paging 或 streaming，就可以做到真正分批讀來源資料；
+但如果 Reader 一開始就把 API 資料全部抓回來，那 chunk 主要就只剩下分批 write / commit 的效果。
+
+回到我們這個專案，資料量本身很小，
+而且原本 Reader 是初始化時一次呼叫 API，把資料完整拿回來。
+所以 chunk-based transaction 在這裡沒有帶來太明顯的效益。
 
 3.3 Retry / Skip 機制
 
