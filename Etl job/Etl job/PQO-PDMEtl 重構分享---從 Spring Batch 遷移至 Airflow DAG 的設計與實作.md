@@ -240,7 +240,7 @@ Spring Batch 主要針對大批次資料處理設計，常見能力包括：
 - retry / skip 機制（容錯處理）
 - partition / parallel（將資料分批並行處理，以提升大量資料處理效率）
 
-=> 適用於以下情境：
+因此，Spring Batch 特別適用於以下情境：
 
 - 資料量大
 - 執行時間長
@@ -249,30 +249,36 @@ Spring Batch 主要針對大批次資料處理設計，常見能力包括：
 
 ## 3.2 Chunk-based Transaction 概念
 
-Spring Batch 通常會用 chunk 為單位處理資料，例如：
+Spring Batch 常見的處理方式是以 chunk 作為 transaction 邊界，例如：
 
 ```java
-stepBuilderFactory.get("step")
-    .<Input, Output>chunk(100)
-    .reader(reader)
-    .processor(processor)
-    .writer(writer)
-    .build();
+stepBuilderFactory.get("step")  
+.<Input, Output>chunk(100)  
+.reader(reader)  
+.processor(processor)  
+.writer(writer)  
+.build();
 ```
 
-執行概念如下：
+當 chunk size 設為 100 時，Spring Batch 會透過 Reader 逐筆取得資料，經 Processor 處理後，累積到 100 筆時，交由 Writer 寫入，並 commit 該 chunk 的 transaction。
+
+概念如下：
 
 ```text
-讀100筆 → 處理100筆 → 寫入100筆 → commit
+read / process 累積 100 筆 → write 100 筆 → commit
 ```
 
 這種設計適合：
 
-- 資料量大
-- 單一 transaction 不宜過大
-- 允許部分 chunk 成功、部分 chunk 失敗
+- 資料量大，不適合用單一 transaction 處理全部資料
+- 可以接受部分 chunk 已 commit，而後續 chunk 失敗的批次任務
 
-但在本專案中，由於資料量小且單次 API 可取得完整資料，因此 chunk-based transaction 的價值有限。
+需特別注意的是，chunk size 控制的是 Spring Batch 的處理與 commit 邊界，並不一定代表來源資料會被分批取得。 是否能真正分批讀取來源資料，取決於 Reader 的實作方式。
+
+在本專案中，資料量小是 chunk-based transaction 價值有限的主要原因。  
+此外，原本 Reader 會在初始化階段一次呼叫 API 並取得完整資料，因此 chunk 並未發揮分批讀取來源資料的效果，主要只剩分批 write / commit 的作用。
+
+因此，對本專案而言，使用 chunk-based transaction 並沒有帶來明顯效益。
 
 ---
 
@@ -302,14 +308,16 @@ stepBuilderFactory.get("step")
     - 若 exception 符合 `retry(...)` 設定
 	- 則依 `retryLimit(...)` 設定的上限進行重試
 2. **Skip 機制**
-    - - 若 retry 後仍無法成功
+    - 若 retry 後仍無法成功
 	- 且 exception 符合 `skip(...)` 設定
 	- 且累計 skip 次數未超過 `skipLimit(...)`
 	- 則略過該 item，繼續處理後續資料
 3. **Skip Limit**
-    - - 若 exception 不符合 retry / skip 條件
+    - 若 exception 不符合 retry / skip 條件
 	- 或 skip 次數超過 `skipLimit(...)`
 	- 則 Step fail
+
+> 註：此處使用 `Exception.class` 是為了簡化範例；實務上通常會針對特定 exception 類型設定 retry / skip，避免將所有錯誤都視為可重試或可略過。
 
 ---
 
@@ -338,7 +346,7 @@ stepBuilderFactory.get("step")
 |retry / skip|採整批 rollback|
 |partition / parallel|資料量小，不需要|
 
-=> 可以觀察到，大部分 framework 提供的能力，在本專案中並未被使用。
+可以觀察到，本專案實際需求並未充分使用 Spring Batch 所提供的大批次處理能力。
 
 ---
 
@@ -359,7 +367,7 @@ Spring Batch 本身沒有問題，但對本專案而言，出現了：
 - 無需 retry / skip
 - 單一 transaction 即可完成
 
-=> 因此，整體架構相對過重，並增加了維護成本。
+因此，對本專案而言，整體架構相對過重，並增加了理解與維護成本。
 
 ---
 
@@ -474,7 +482,7 @@ app/
     └── __init__.py
 ```
 
-各個檔案內容如下：
+本次重構相關的主要檔案說明如下：
 ### `etl_ti_proc_opt.py`
 
 此檔案負責定義一個完整的 ETL DAG，其內容可拆為四個部分：  
@@ -647,41 +655,11 @@ Extract → Transform → Generate SQL → DELETE → INSERT → Logging
 
 這使得 ETL 任務除了 Airflow log 外，也能保留資料庫層級的控制與追蹤資訊。
 
-## 6.6 執行流程總結
+## 6.6 BPMN-style 執行流程總結
 
-流程如下：
+以下以 BPMN-style 流程圖表示 ETL 的主流程、空資料處理，以及錯誤處理流程。
 
-```mermaid
-flowchart TD
-    A[Start] --> B[Call API]  
-    B --> C{Empty?}  
-  
-    C -->|Yes| D[Write Perf Log]  
-    D --> Z[End]  
-  
-    C -->|No| E[Transform]  
-    E --> F[Generate SQL]  
-    F --> G[Begin Transaction]  
-  
-    G --> H[DELETE]  
-    H --> I{DELETE Fail?}  
-  
-    I -->|Yes| ERR  
-    I -->|No| M[INSERT]  
-  
-    M --> N{Insert Fail?}  
-  
-    N -->|Yes| ERR  
-    N -->|No| R[Commit]  
-  
-    R --> S[Write Perf Log]  
-    S --> Z  
-  
-    %% 共用錯誤流程  
-    ERR[Write Ctrl Log] --> RB[Rollback]  
-    RB --> PL[Write Perf Log]  
-    PL --> Y[Raise Exception / Task Fail]
-```
+![[pqo_pdm_full_load_etl_drawio.drawio 1.png]]
 
 
 ---
@@ -740,7 +718,7 @@ PDM API → Full Load → Oracle
 ## 7.5 Failure Isolation（失敗隔離）  
   
 在原 Spring Batch 架構中，多個 ETL Job 綁定在同一個 Spring Boot application 中執行。  
-若其中一個 Job 發生 exception，可能導致整個 application 中斷，進而使後續 Job 無法執行。  
+若其中一個 Job 發生未處理 exception，或錯誤發生在 application 初始化階段，可能導致整個 application 中斷，進而使後續 Job 無法執行。
   
 也就是說，原系統中的多個 ETL 任務彼此之間存在一定程度的耦合。  
   
@@ -804,6 +782,12 @@ DELETE + INSERT
 - 邏輯簡單
 - 容易保證資料一致性
 - 可搭配 transaction 確保「全成功或全 rollback」
+
+需特別說明的是，Incremental Load 通常需要資料來源提供變更追蹤資訊，例如 update timestamp、last modified time 或 CDC。  
+  
+在本專案中，PDM API 僅提供全量資料，未提供變更追蹤機制。若強行採用 Incremental Load，系統需自行比對 API 回傳資料與 DB 既有資料的差異，反而會增加資料比對邏輯與維護複雜度。  
+  
+因此，在目前資料量小且來源僅提供全量資料的情境下，Full Load 是較合理且穩定的選擇。
 
 ### Trade-off
 
