@@ -595,6 +595,13 @@ TI_WF_OPT_CATG 對應一個 DAG
 如果遇到像 API 暫時 timeout、或網路不穩這種「暫時性問題」，
 Airflow 會自動幫我們重試，不需要人工介入。
 
+不過這裡要注意，Airflow 的 retry 是 task-level retry。
+
+也就是說，如果這個 task fail，Airflow 會重新跑整個 ETL task，
+不是像 Spring Batch retry / skip 那樣，只針對單一 item 做 retry 或 skip。
+
+所以這邊的 retry 比較適合處理 API timeout、網路不穩這種暫時性問題。
+
 6.5 ETL 控制與績效記錄
 
 除了 Airflow 自己的 log 之外，
@@ -701,11 +708,14 @@ log 是什麼
 
 第五個是 failure isolation。
 
-原本三個 ETL Job 綁在同一個 Spring Boot application 裡面，
-如果其中一個 fail，可能導致整個 application 中斷，後續 Job 也跟著受影響。
+如果錯誤是發生在 Step 裡，而且有被 Spring Batch 正常處理，
+不一定會讓整個 application 中斷。
 
-現在改成 Airflow 後，每個 ETL 都是獨立 DAG，
-所以一個 ETL fail，不會影響其他 ETL。
+但如果是未處理的 exception，或是發生在 application 初始化階段，
+就有可能讓整個 application 中斷，進而影響後續 Job。
+
+所以我這邊會說，原本多個 ETL Job 不是完全隔離，
+它們還是綁在同一個 application process 裡。
 
 8. Trade-off 與設計取捨
 8.1 SQL 執行策略：row-by-row
